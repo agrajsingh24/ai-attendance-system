@@ -6,3 +6,4 @@ numpy
 sqlalchemy
 python-multipart
 tf-keras
+gunicorn   (optional but recommended)

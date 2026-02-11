@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, Form
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, String, Text
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -9,9 +9,11 @@ import json
 import numpy as np
 from datetime import datetime
 
-app = FastAPI()
+# ================= APP INIT =================
 
-# Enable CORS
+app = FastAPI(title="AI Attendance System 🚀")
+
+# CORS (Restrict to your Netlify URL later)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,23 +22,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Database setup
+# ================= DATABASE =================
+
 DATABASE_URL = "sqlite:///./students.db"
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"check_same_thread": False}
+)
+
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
-# ================= DATABASE MODELS =================
-
 class Student(Base):
     __tablename__ = "students"
+
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String)
-    roll_no = Column(String, unique=True)
-    dob = Column(String)
-    embeddings = Column(Text)  # Stored as JSON
+    name = Column(String, nullable=False)
+    roll_no = Column(String, unique=True, nullable=False)
+    dob = Column(String, nullable=False)
+    embeddings = Column(Text, nullable=False)
 
 Base.metadata.create_all(bind=engine)
+
+# ================= STORAGE =================
 
 UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -44,17 +53,20 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 # ================= HELPER FUNCTIONS =================
 
 def get_embedding(image_path):
-    embedding = DeepFace.represent(
-        img_path=image_path,
-        model_name="Facenet",
-        enforce_detection=False
-    )
-    return embedding[0]["embedding"]
+    try:
+        embedding = DeepFace.represent(
+            img_path=image_path,
+            model_name="Facenet",
+            enforce_detection=False
+        )
+        return embedding[0]["embedding"]
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Face processing error: {str(e)}")
 
 def cosine_similarity(a, b):
     a = np.array(a)
     b = np.array(b)
-    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
 # ================= ROUTES =================
 
@@ -72,6 +84,12 @@ async def register_student(
     files: list[UploadFile] = File(...)
 ):
     db = SessionLocal()
+
+    # Check duplicate roll number
+    existing = db.query(Student).filter(Student.roll_no == roll_no).first()
+    if existing:
+        db.close()
+        raise HTTPException(status_code=400, detail="Roll number already registered")
 
     student_folder = os.path.join(UPLOAD_FOLDER, roll_no)
     os.makedirs(student_folder, exist_ok=True)
@@ -95,6 +113,7 @@ async def register_student(
 
     db.add(student)
     db.commit()
+    db.close()
 
     return {"message": "Student Registered Successfully ✅"}
 
@@ -105,6 +124,7 @@ async def mark_attendance(file: UploadFile = File(...)):
     db = SessionLocal()
 
     temp_path = os.path.join(UPLOAD_FOLDER, "classroom.jpg")
+
     with open(temp_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
@@ -135,7 +155,7 @@ async def mark_attendance(file: UploadFile = File(...)):
         for class_emb in classroom_embeddings:
             for stored_emb in stored_embeddings:
                 similarity = cosine_similarity(class_emb, stored_emb)
-                if similarity > 0.7:  # Threshold
+                if similarity > 0.7:
                     matched = True
                     break
             if matched:
@@ -145,6 +165,8 @@ async def mark_attendance(file: UploadFile = File(...)):
             present_students.append(student.name)
         else:
             absent_students.append(student.name)
+
+    db.close()
 
     return {
         "date": str(datetime.now().date()),
@@ -157,4 +179,7 @@ async def mark_attendance(file: UploadFile = File(...)):
 @app.get("/students/")
 def get_students():
     db = SessionLocal()
-    return db.query(Student).all()
+    students = db.query(Student).all()
+    db.close()
+
+    return students

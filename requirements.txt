@@ -1,13 +1,8 @@
 fastapi
-uvicorn[standard]
+uvicorn
 sqlalchemy
 psycopg2-binary
-python-jose[cryptography]
 passlib[bcrypt]
+python-jose
 python-multipart
 email-validator
-pydantic
-numpy
-opencv-python-headless
-insightface
-onnxruntime

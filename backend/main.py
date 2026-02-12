@@ -12,8 +12,7 @@ import uuid
 import logging
 
 # ================= CONFIG =================
-FRONTEND_URL = "https://your-netlify-site.netlify.app"  # 🔴 CHANGE THIS
-DATABASE_URL = "sqlite:///./students.db"
+DATABASE_URL = "sqlite:///students.db"
 UPLOAD_FOLDER = "uploads"
 SIMILARITY_THRESHOLD = 0.7
 MAX_UPLOAD_SIZE = 5 * 1024 * 1024  # 5MB
@@ -26,7 +25,11 @@ logging.basicConfig(level=logging.INFO)
 # ================= CORS =================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL],
+    allow_origins=[
+        "http://localhost:5500",
+        "http://127.0.0.1:5500",
+        "https://automated-attandance.netlify.app"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -43,6 +46,7 @@ Base = declarative_base()
 
 class Student(Base):
     __tablename__ = "students"
+
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
     roll_no = Column(String, unique=True, nullable=False)
@@ -88,6 +92,7 @@ def cosine_similarity(a, b):
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
 # ================= ROUTES =================
+
 @app.get("/")
 def root():
     return {"message": "DeepFace Attendance Backend Running 🚀"}
@@ -112,6 +117,7 @@ async def register_student(
 
     for file in files:
         file_path = os.path.join(student_folder, f"{uuid.uuid4().hex}.jpg")
+
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
@@ -151,6 +157,7 @@ async def mark_attendance(
         )
 
         classroom_embeddings = []
+
         for face in detected_faces:
             face_embedding = DeepFace.represent(
                 img_path=face["face"],

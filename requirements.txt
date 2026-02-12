@@ -4,6 +4,7 @@ opencv-python
 deepface
 numpy
 sqlalchemy
+psycopg2-binary
 python-multipart
 tf-keras
 gunicorn

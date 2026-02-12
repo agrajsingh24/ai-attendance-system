@@ -17,7 +17,8 @@ DATABASE_URL = "sqlite:///./students.db"
 
 # 0.6 is strict
 # 0.65 slightly relaxed (better for group photos)
-MATCH_THRESHOLD = 0.65  
+MATCH_THRESHOLD = 0.75
+
 
 # =========================
 # DATABASE SETUP

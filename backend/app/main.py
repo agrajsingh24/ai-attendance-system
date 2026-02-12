@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from backend.app.db.database import Base, engine
+from app.db.database import Base, engine
 from app.routers import auth, teacher, student
 
 Base.metadata.create_all(bind=engine)

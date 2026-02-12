@@ -12,8 +12,11 @@ import uuid
 import logging
 
 # ================= CONFIG =================
-DATABASE_URL = "sqlite:///students.db"
-UPLOAD_FOLDER = "uploads"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+DATABASE_URL = f"sqlite:///{os.path.join(BASE_DIR, 'students.db')}"
+UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
+
 SIMILARITY_THRESHOLD = 0.7
 MAX_UPLOAD_SIZE = 5 * 1024 * 1024  # 5MB
 
@@ -55,7 +58,7 @@ class Student(Base):
 
 Base.metadata.create_all(bind=engine)
 
-# ================= DB DEPENDENCY =================
+# ================= DEPENDENCY =================
 def get_db():
     db = SessionLocal()
     try:
@@ -63,10 +66,10 @@ def get_db():
     finally:
         db.close()
 
-# ================= STORAGE =================
+# ================= CREATE UPLOAD FOLDER =================
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# ================= MIDDLEWARE (UPLOAD LIMIT) =================
+# ================= UPLOAD SIZE LIMIT =================
 @app.middleware("http")
 async def limit_upload_size(request: Request, call_next):
     if request.headers.get("content-length"):
@@ -134,7 +137,7 @@ async def register_student(
     db.add(student)
     db.commit()
 
-    logging.info(f"Registered student {roll_no}")
+    logging.info(f"Registered student: {roll_no}")
 
     return {"message": "Student Registered Successfully ✅"}
 

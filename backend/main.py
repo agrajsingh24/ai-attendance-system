@@ -3,11 +3,21 @@ import pickle
 import numpy as np
 import cv2
 
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import Optional
+
 from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, Column, Integer, String, LargeBinary
-from sqlalchemy.orm import sessionmaker, declarative_base, Session
+from fastapi.security import OAuth2PasswordBearer
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+
+from sqlalchemy import (
+    create_engine, Column, Integer, String,
+    ForeignKey, DateTime, Float
+)
+from sqlalchemy.orm import sessionmaker, declarative_base, relationship, Session
+
 from insightface.app import FaceAnalysis
 
 # =========================
@@ -15,39 +25,92 @@ from insightface.app import FaceAnalysis
 # =========================
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./students.db").strip()
-MATCH_THRESHOLD = 1.1
+
+SECRET_KEY = "supersecretkey"  # change later
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60
+
+MATCH_THRESHOLD = 1.0
 
 # =========================
-# DATABASE SETUP
+# DATABASE
 # =========================
 
-if DATABASE_URL.startswith("sqlite"):
-    engine = create_engine(
-        DATABASE_URL,
-        connect_args={"check_same_thread": False}
-    )
-else:
-    engine = create_engine(
-        DATABASE_URL,
-        pool_pre_ping=True
-    )
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"check_same_thread": False}
+    if DATABASE_URL.startswith("sqlite") else {}
+)
 
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
+
+# =========================
+# MODELS
+# =========================
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String)
+    email = Column(String, unique=True)
+    password = Column(String)
+    role = Column(String)  # student / teacher
 
 
 class Student(Base):
     __tablename__ = "students"
 
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, nullable=False)
-    roll_no = Column(String, unique=True, index=True)
-    dob = Column(String)
-    embedding = Column(LargeBinary, nullable=False)
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"))
+    roll_no = Column(String, unique=True)
+    embedding = Column(String)  # stored as pickle string
+
+
+class AttendanceSession(Base):
+    __tablename__ = "attendance_sessions"
+
+    id = Column(Integer, primary_key=True)
+    teacher_id = Column(Integer)
+    class_name = Column(String)
+    date = Column(String)
+    period = Column(Integer)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    locked_until = Column(DateTime)
+
+
+class AttendanceRecord(Base):
+    __tablename__ = "attendance_records"
+
+    id = Column(Integer, primary_key=True)
+    session_id = Column(Integer)
+    student_id = Column(Integer)
+    status = Column(String)
+    confidence = Column(Float)
+    marked_at = Column(DateTime, default=datetime.utcnow)
 
 
 Base.metadata.create_all(bind=engine)
 
+# =========================
+# AUTH
+# =========================
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+
+def hash_password(password):
+    return pwd_context.hash(password)
+
+def verify_password(plain, hashed):
+    return pwd_context.verify(plain, hashed)
+
+def create_access_token(data: dict):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 def get_db():
     db = SessionLocal()
@@ -56,12 +119,23 @@ def get_db():
     finally:
         db.close()
 
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id = payload.get("user_id")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
 
 # =========================
 # FASTAPI INIT
 # =========================
 
-app = FastAPI(title="AI Attendance System (Railway Stable Version)")
+app = FastAPI(title="College Attendance System")
 
 app.add_middleware(
     CORSMiddleware,
@@ -72,161 +146,166 @@ app.add_middleware(
 )
 
 # =========================
-# LAZY LOAD INSIGHTFACE
+# INSIGHTFACE (Lazy Load)
 # =========================
 
-app_face = None
-
+face_model = None
 
 def get_model():
-    global app_face
-    if app_face is None:
-        print("🔄 Loading InsightFace model...")
-        app_face = FaceAnalysis(name="buffalo_s")
-        app_face.prepare(ctx_id=-1)  # CPU
-        print("✅ Model loaded")
-    return app_face
+    global face_model
+    if face_model is None:
+        face_model = FaceAnalysis(name="buffalo_s")
+        face_model.prepare(ctx_id=-1)
+    return face_model
 
-
-# =========================
-# HELPER: NORMALIZE
-# =========================
-
-def normalize(embedding):
-    return embedding / np.linalg.norm(embedding)
-
+def normalize(e):
+    return e / np.linalg.norm(e)
 
 # =========================
-# ROOT (HEALTHCHECK SAFE)
+# ROUTES
 # =========================
 
 @app.get("/")
 def root():
     return {"status": "Backend Running"}
 
-
-# =========================
-# REGISTER STUDENT
-# =========================
+# -------------------------
+# REGISTER
+# -------------------------
 
 @app.post("/register")
-async def register_student(
-    name: str = Form(...),
-    roll_no: str = Form(...),
-    dob: str = Form(...),
-    files: list[UploadFile] = File(...),
-    db: Session = Depends(get_db)
-):
-    if len(files) < 3:
-        raise HTTPException(status_code=400, detail="Upload at least 3 selfies")
+def register(name: str, email: str, password: str, role: str,
+             db: Session = Depends(get_db)):
 
-    existing = db.query(Student).filter(Student.roll_no == roll_no).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="Roll number already exists")
+    if db.query(User).filter(User.email == email).first():
+        raise HTTPException(400, "Email already exists")
 
-    model = get_model()
-
-    embeddings = []
-
-    for file in files:
-        contents = await file.read()
-        np_img = np.frombuffer(contents, np.uint8)
-        image = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
-
-        faces = model.get(image)
-
-        if len(faces) != 1:
-            raise HTTPException(
-                status_code=400,
-                detail="Each selfie must contain exactly one face"
-            )
-
-        emb = normalize(faces[0].embedding)
-        embeddings.append(emb)
-
-    avg_embedding = np.mean(embeddings, axis=0)
-    avg_embedding = normalize(avg_embedding)
-
-    new_student = Student(
+    user = User(
         name=name,
-        roll_no=roll_no,
-        dob=dob,
-        embedding=pickle.dumps(avg_embedding)
+        email=email,
+        password=hash_password(password),
+        role=role
     )
 
-    db.add(new_student)
+    db.add(user)
     db.commit()
+    db.refresh(user)
 
-    return {"message": "Student registered successfully"}
+    return {"message": "User registered"}
 
+# -------------------------
+# LOGIN
+# -------------------------
 
-# =========================
-# MARK ATTENDANCE
-# =========================
+@app.post("/login")
+def login(email: str, password: str, db: Session = Depends(get_db)):
 
-@app.post("/attendance")
-async def mark_attendance(
+    user = db.query(User).filter(User.email == email).first()
+
+    if not user or not verify_password(password, user.password):
+        raise HTTPException(401, "Invalid credentials")
+
+    token = create_access_token({"user_id": user.id})
+
+    return {"access_token": token}
+
+# -------------------------
+# REGISTER FACE (Student)
+# -------------------------
+
+@app.post("/student/register-face")
+async def register_face(
     file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    if current_user.role != "student":
+        raise HTTPException(403, "Only students allowed")
+
     model = get_model()
 
-    contents = await file.read()
-    np_img = np.frombuffer(contents, np.uint8)
+    img = await file.read()
+    np_img = np.frombuffer(img, np.uint8)
     image = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
 
     faces = model.get(image)
 
-    if len(faces) == 0:
-        raise HTTPException(status_code=400, detail="No faces detected")
+    if len(faces) != 1:
+        raise HTTPException(400, "One face required")
+
+    embedding = normalize(faces[0].embedding)
+
+    student = Student(
+        user_id=current_user.id,
+        roll_no=str(current_user.id),
+        embedding=pickle.dumps(embedding).hex()
+    )
+
+    db.add(student)
+    db.commit()
+
+    return {"message": "Face registered"}
+
+# -------------------------
+# TEACHER MARK ATTENDANCE
+# -------------------------
+
+@app.post("/teacher/mark-attendance")
+async def mark_attendance(
+    class_name: str = Form(...),
+    period: int = Form(...),
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if current_user.role != "teacher":
+        raise HTTPException(403, "Only teachers allowed")
+
+    model = get_model()
+
+    img = await file.read()
+    np_img = np.frombuffer(img, np.uint8)
+    image = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
+
+    faces = model.get(image)
 
     students = db.query(Student).all()
 
-    if not students:
-        raise HTTPException(status_code=400, detail="No registered students")
+    session = AttendanceSession(
+        teacher_id=current_user.id,
+        class_name=class_name,
+        date=str(datetime.now().date()),
+        period=period,
+        locked_until=datetime.utcnow() + timedelta(hours=24)
+    )
 
-    known_encodings = []
-    known_names = []
+    db.add(session)
+    db.commit()
+    db.refresh(session)
 
     for student in students:
-        known_encodings.append(pickle.loads(student.embedding))
-        known_names.append(student.name)
+        known = pickle.loads(bytes.fromhex(student.embedding))
+        status = "absent"
+        confidence = 0.0
 
-    known_encodings = np.array(known_encodings)
+        for face in faces:
+            emb = normalize(face.embedding)
+            dist = np.linalg.norm(known - emb)
+            if dist < MATCH_THRESHOLD:
+                status = "present"
+                confidence = float(dist)
 
-    present_students = set()
-
-    for face in faces:
-        face_embedding = normalize(face.embedding)
-
-        distances = np.linalg.norm(
-            known_encodings - face_embedding,
-            axis=1
+        record = AttendanceRecord(
+            session_id=session.id,
+            student_id=student.id,
+            status=status,
+            confidence=confidence
         )
+        db.add(record)
 
-        min_distance = np.min(distances)
-        best_match_index = np.argmin(distances)
+    db.commit()
 
-        print("Distances:", distances)
-        print("Best match:", known_names[best_match_index])
-        print("Min distance:", min_distance)
-
-        if min_distance < MATCH_THRESHOLD:
-            present_students.add(known_names[best_match_index])
-
-    all_students = set(known_names)
-    absent_students = list(all_students - present_students)
-
-    print("Distances:", distances)
-    print("Min Distance:", min_distance)
-
-
-    return {
-        "date": str(datetime.now().date()),
-        "time": datetime.now().strftime("%H:%M:%S"),
-        "present": list(present_students),
-        "absent": absent_students
-    }
+    return {"message": "Attendance marked"}
 
 
 # =========================

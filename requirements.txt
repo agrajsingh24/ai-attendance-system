@@ -2,8 +2,10 @@ fastapi
 uvicorn
 sqlalchemy
 psycopg2-binary
+python-multipart
+passlib[bcrypt]
+python-jose
 insightface
 onnxruntime
 opencv-python-headless
 numpy
-python-multipart

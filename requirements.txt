@@ -10,3 +10,4 @@ pydantic
 numpy
 opencv-python-headless
 insightface
+onnxruntime

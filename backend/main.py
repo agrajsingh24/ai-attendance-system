@@ -15,7 +15,7 @@ import logging
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
 
-SIMILARITY_THRESHOLD = 0.6
+SIMILARITY_THRESHOLD = 0.65
 MAX_UPLOAD_SIZE = 5 * 1024 * 1024  # 5MB
 
 logging.basicConfig(level=logging.INFO)
@@ -26,11 +26,11 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL environment variable not set")
 
-# Fix Render postgres URL issue
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True
+)
 
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -70,9 +70,10 @@ def get_db():
     finally:
         db.close()
 
+# ================= CREATE UPLOAD FOLDER =================
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# ================= LIMIT FILE SIZE =================
+# ================= UPLOAD SIZE LIMIT =================
 @app.middleware("http")
 async def limit_upload_size(request: Request, call_next):
     if request.headers.get("content-length"):
@@ -81,17 +82,18 @@ async def limit_upload_size(request: Request, call_next):
     return await call_next(request)
 
 # ================= HELPER FUNCTIONS =================
+
 def get_embedding(image_path):
     try:
         embedding = DeepFace.represent(
             img_path=image_path,
-            model_name="Facenet",
-            detector_backend="opencv",
-            enforce_detection=True
+            model_name="SFace",
+            detector_backend="opencv",   # lighter backend
+            enforce_detection=False
         )
         return embedding[0]["embedding"]
-    except Exception:
-        raise HTTPException(status_code=400, detail="No face detected or invalid image")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Embedding error: {str(e)}")
 
 def cosine_similarity(a, b):
     a = np.array(a)
@@ -104,7 +106,7 @@ def cosine_similarity(a, b):
 def root():
     return {"message": "AI Attendance Backend Running 🚀"}
 
-# -------- REGISTER --------
+# -------- REGISTER STUDENT --------
 @app.post("/register/")
 async def register_student(
     name: str = Form(...),
@@ -131,6 +133,8 @@ async def register_student(
         embedding = get_embedding(file_path)
         all_embeddings.append(embedding)
 
+        os.remove(file_path)  # clean after embedding
+
     student = Student(
         name=name,
         roll_no=roll_no,
@@ -141,9 +145,11 @@ async def register_student(
     db.add(student)
     db.commit()
 
+    logging.info(f"Registered student: {roll_no}")
+
     return {"message": "Student Registered Successfully ✅"}
 
-# -------- ATTENDANCE --------
+# -------- MARK ATTENDANCE --------
 @app.post("/attendance/")
 async def mark_attendance(
     file: UploadFile = File(...),
@@ -156,22 +162,25 @@ async def mark_attendance(
         shutil.copyfileobj(file.file, buffer)
 
     try:
-        faces = DeepFace.extract_faces(
+        detected_faces = DeepFace.extract_faces(
             img_path=temp_path,
             detector_backend="opencv",
-            enforce_detection=True
+            enforce_detection=False
         )
+
+        if not detected_faces:
+            raise HTTPException(status_code=400, detail="No faces detected")
 
         classroom_embeddings = []
 
-        for face in faces:
-            embedding = DeepFace.represent(
+        for face in detected_faces:
+            face_embedding = DeepFace.represent(
                 img_path=face["face"],
-                model_name="Facenet",
+                model_name="SFace",
                 detector_backend="opencv",
                 enforce_detection=False
             )
-            classroom_embeddings.append(embedding[0]["embedding"])
+            classroom_embeddings.append(face_embedding[0]["embedding"])
 
         students = db.query(Student).all()
 

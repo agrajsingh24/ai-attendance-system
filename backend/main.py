@@ -3,13 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import create_engine, Column, Integer, String, LargeBinary
 from sqlalchemy.orm import sessionmaker, declarative_base
-import face_recognition
 import numpy as np
-import os
-import shutil
-import uuid
-import pickle
 import cv2
+import insightface
+import pickle
 from datetime import datetime
 
 # =========================
@@ -17,10 +14,7 @@ from datetime import datetime
 # =========================
 
 DATABASE_URL = "sqlite:///./students.db"
-UPLOAD_FOLDER = "temp_uploads"
-MATCH_THRESHOLD = 0.5  # 0.4 strict | 0.5 balanced | 0.6 lenient
-
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+MATCH_THRESHOLD = 0.6  # lower = stricter
 
 # =========================
 # DATABASE SETUP
@@ -34,7 +28,6 @@ engine = create_engine(
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-
 class Student(Base):
     __tablename__ = "students"
 
@@ -42,11 +35,9 @@ class Student(Base):
     name = Column(String, nullable=False)
     roll_no = Column(String, unique=True, index=True)
     dob = Column(String)
-    embedding = Column(LargeBinary, nullable=False)  # store 128d encoding
-
+    embedding = Column(LargeBinary, nullable=False)
 
 Base.metadata.create_all(bind=engine)
-
 
 def get_db():
     db = SessionLocal()
@@ -55,12 +46,18 @@ def get_db():
     finally:
         db.close()
 
+# =========================
+# LOAD INSIGHTFACE MODEL
+# =========================
+
+app_face = insightface.app.FaceAnalysis(name="buffalo_l")
+app_face.prepare(ctx_id=0)
 
 # =========================
-# APP INIT
+# FASTAPI INIT
 # =========================
 
-app = FastAPI(title="AI Attendance System (face-recognition)")
+app = FastAPI(title="AI Attendance System (InsightFace)")
 
 app.add_middleware(
     CORSMiddleware,
@@ -70,19 +67,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# =========================
-# ROUTES
-# =========================
-
 @app.get("/")
 def root():
-    return {"message": "AI Attendance Backend Running (face-recognition version)"}
+    return {"message": "InsightFace Attendance Backend Running"}
 
-
-# -------------------------
-# STUDENT REGISTRATION
-# -------------------------
+# =========================
+# REGISTER STUDENT
+# =========================
 
 @app.post("/register")
 async def register_student(
@@ -99,32 +90,25 @@ async def register_student(
     if existing:
         raise HTTPException(status_code=400, detail="Roll number already exists")
 
-    encodings = []
+    embeddings = []
 
     for file in files:
         contents = await file.read()
         np_img = np.frombuffer(contents, np.uint8)
         image = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
 
-        if image is None:
-            raise HTTPException(status_code=400, detail="Invalid image file")
-
-        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-        faces = face_recognition.face_encodings(rgb)
+        faces = app_face.get(image)
 
         if len(faces) != 1:
             raise HTTPException(
                 status_code=400,
-                detail="Each selfie must contain exactly one clear face"
+                detail="Each selfie must contain exactly one face"
             )
 
-        encodings.append(faces[0])
+        embeddings.append(faces[0].embedding)
 
-    # Average embedding
-    avg_encoding = np.mean(encodings, axis=0)
-
-    embedding_bytes = pickle.dumps(avg_encoding)
+    avg_embedding = np.mean(embeddings, axis=0)
+    embedding_bytes = pickle.dumps(avg_embedding)
 
     new_student = Student(
         name=name,
@@ -138,10 +122,9 @@ async def register_student(
 
     return {"message": "Student registered successfully"}
 
-
-# -------------------------
-# ATTENDANCE (MULTI FACE)
-# -------------------------
+# =========================
+# MARK ATTENDANCE
+# =========================
 
 @app.post("/attendance")
 async def mark_attendance(
@@ -152,16 +135,9 @@ async def mark_attendance(
     np_img = np.frombuffer(contents, np.uint8)
     image = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
 
-    if image is None:
-        raise HTTPException(status_code=400, detail="Invalid image")
+    faces = app_face.get(image)
 
-    rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-    # Detect multiple faces
-    face_locations = face_recognition.face_locations(rgb)
-    face_encodings = face_recognition.face_encodings(rgb, face_locations)
-
-    if len(face_encodings) == 0:
+    if len(faces) == 0:
         raise HTTPException(status_code=400, detail="No faces detected")
 
     students = db.query(Student).all()
@@ -179,18 +155,19 @@ async def mark_attendance(
 
     present_students = set()
 
-    for face_encoding in face_encodings:
-        distances = face_recognition.face_distance(known_encodings, face_encoding)
+    for face in faces:
+        face_embedding = face.embedding
 
-        if len(distances) == 0:
-            continue
+        distances = np.linalg.norm(
+            np.array(known_encodings) - face_embedding,
+            axis=1
+        )
 
         min_distance = np.min(distances)
         best_match_index = np.argmin(distances)
 
         if min_distance < MATCH_THRESHOLD:
-            name = known_names[best_match_index]
-            present_students.add(name)
+            present_students.add(known_names[best_match_index])
 
     all_students = set(known_names)
     absent_students = list(all_students - present_students)

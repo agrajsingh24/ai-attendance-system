@@ -2,7 +2,7 @@ fastapi
 uvicorn
 sqlalchemy
 python-multipart
-face-recognition
 opencv-python-headless
 numpy
-gunicorn
+insightface
+onnxruntime

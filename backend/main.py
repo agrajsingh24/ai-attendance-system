@@ -14,11 +14,7 @@ from datetime import datetime
 # =========================
 
 DATABASE_URL = "sqlite:///./students.db"
-
-# 0.6 is strict
-# 0.65 slightly relaxed (better for group photos)
-MATCH_THRESHOLD = 0.75
-
+MATCH_THRESHOLD = 0.6  # good for normalized embeddings
 
 # =========================
 # DATABASE SETUP
@@ -73,8 +69,17 @@ app_face = None
 @app.on_event("startup")
 def load_model():
     global app_face
-    app_face = FaceAnalysis(name="buffalo_s")  # lightweight model
+    app_face = FaceAnalysis(name="buffalo_s")
     app_face.prepare(ctx_id=-1)  # CPU only
+
+
+# =========================
+# HELPER: NORMALIZE
+# =========================
+
+def normalize(embedding):
+    return embedding / np.linalg.norm(embedding)
+
 
 # =========================
 # ROOT
@@ -83,6 +88,7 @@ def load_model():
 @app.get("/")
 def root():
     return {"message": "InsightFace Attendance Backend Running"}
+
 
 # =========================
 # REGISTER STUDENT
@@ -118,10 +124,11 @@ async def register_student(
                 detail="Each selfie must contain exactly one face"
             )
 
-        embeddings.append(faces[0].embedding.astype(np.float32))
+        emb = normalize(faces[0].embedding)
+        embeddings.append(emb)
 
-    # Average embedding (master embedding)
-    avg_embedding = np.mean(embeddings, axis=0).astype(np.float32)
+    avg_embedding = np.mean(embeddings, axis=0)
+    avg_embedding = normalize(avg_embedding)
 
     embedding_bytes = pickle.dumps(avg_embedding)
 
@@ -136,6 +143,7 @@ async def register_student(
     db.commit()
 
     return {"message": "Student registered successfully"}
+
 
 # =========================
 # MARK ATTENDANCE
@@ -160,12 +168,11 @@ async def mark_attendance(
     if not students:
         raise HTTPException(status_code=400, detail="No registered students")
 
-    # Load known embeddings
     known_encodings = []
     known_names = []
 
     for student in students:
-        encoding = pickle.loads(student.embedding).astype(np.float32)
+        encoding = pickle.loads(student.embedding)
         known_encodings.append(encoding)
         known_names.append(student.name)
 
@@ -173,21 +180,16 @@ async def mark_attendance(
 
     present_students = set()
 
-    # For each detected face
     for face in faces:
-        face_embedding = face.embedding.astype(np.float32)
+        face_embedding = normalize(face.embedding)
 
-        # Compute distances to ALL students
         distances = np.linalg.norm(
             known_encodings - face_embedding,
             axis=1
         )
 
+        min_distance = np.min(distances)
         best_match_index = np.argmin(distances)
-        min_distance = distances[best_match_index]
-
-        # Debug (optional)
-        # print("Min distance:", min_distance)
 
         if min_distance < MATCH_THRESHOLD:
             present_students.add(known_names[best_match_index])

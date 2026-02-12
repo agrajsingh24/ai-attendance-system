@@ -6,3 +6,4 @@ opencv-python-headless==4.9.0.80
 numpy==1.26.4
 insightface==0.7.3
 onnxruntime==1.17.1
+

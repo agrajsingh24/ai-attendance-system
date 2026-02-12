@@ -1,42 +1,34 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
+from datetime import timedelta
+
 from app.db.database import get_db
-from app.db.models import User
-from app.schemas.auth import RegisterSchema, LoginSchema
-from app.core.security import hash_password, verify_password, create_access_token
+from app.models.user import User
+from app.core.security import verify_password, create_access_token
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
-@router.post("/register")
-def register(data: RegisterSchema, db: Session = Depends(get_db)):
-
-    if db.query(User).filter(User.email == data.email).first():
-        raise HTTPException(status_code=400, detail="Email already exists")
-
-    user = User(
-        name=data.name,
-        email=data.email,
-        password=hash_password(data.password),
-        role=data.role
-    )
-
-    db.add(user)
-    db.commit()
-
-    return {"message": "User registered successfully"}
 
 @router.post("/login")
-def login(data: LoginSchema, db: Session = Depends(get_db)):
+def login(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db)
+):
+    user = db.query(User).filter(User.username == form_data.username).first()
 
-    user = db.query(User).filter(User.email == data.email).first()
+    if not user or not verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials"
+        )
 
-    if not user or not verify_password(data.password, user.password):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-
-    token = create_access_token({"user_id": user.id})
+    access_token = create_access_token(
+        data={"sub": user.username, "role": user.role},
+        expires_delta=timedelta(minutes=60)
+    )
 
     return {
-        "access_token": token,
-        "token_type": "bearer",
-        "role": user.role
+        "access_token": access_token,
+        "token_type": "bearer"
     }

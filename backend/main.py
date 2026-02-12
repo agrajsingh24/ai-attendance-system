@@ -15,22 +15,22 @@ import logging
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
 
-SIMILARITY_THRESHOLD = 0.65  # slightly lower for SFace
+SIMILARITY_THRESHOLD = 0.6
 MAX_UPLOAD_SIZE = 5 * 1024 * 1024  # 5MB
 
 logging.basicConfig(level=logging.INFO)
 
-# ================= DATABASE (POSTGRES FOR RENDER) =================
+# ================= DATABASE =================
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL environment variable not set")
 
-engine = create_engine(
-    DATABASE_URL,
-    pool_pre_ping=True
-)
+# Fix Render postgres URL issue
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -70,10 +70,9 @@ def get_db():
     finally:
         db.close()
 
-# ================= CREATE UPLOAD FOLDER =================
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# ================= UPLOAD SIZE LIMIT =================
+# ================= LIMIT FILE SIZE =================
 @app.middleware("http")
 async def limit_upload_size(request: Request, call_next):
     if request.headers.get("content-length"):
@@ -86,7 +85,8 @@ def get_embedding(image_path):
     try:
         embedding = DeepFace.represent(
             img_path=image_path,
-            model_name="SFace",      # 🔥 LIGHTWEIGHT MODEL
+            model_name="Facenet",
+            detector_backend="opencv",
             enforce_detection=True
         )
         return embedding[0]["embedding"]
@@ -104,7 +104,7 @@ def cosine_similarity(a, b):
 def root():
     return {"message": "AI Attendance Backend Running 🚀"}
 
-# -------- REGISTER STUDENT --------
+# -------- REGISTER --------
 @app.post("/register/")
 async def register_student(
     name: str = Form(...),
@@ -141,11 +141,9 @@ async def register_student(
     db.add(student)
     db.commit()
 
-    logging.info(f"Registered student: {roll_no}")
-
     return {"message": "Student Registered Successfully ✅"}
 
-# -------- MARK ATTENDANCE --------
+# -------- ATTENDANCE --------
 @app.post("/attendance/")
 async def mark_attendance(
     file: UploadFile = File(...),
@@ -158,23 +156,22 @@ async def mark_attendance(
         shutil.copyfileobj(file.file, buffer)
 
     try:
-        detected_faces = DeepFace.extract_faces(
+        faces = DeepFace.extract_faces(
             img_path=temp_path,
+            detector_backend="opencv",
             enforce_detection=True
         )
 
         classroom_embeddings = []
 
-        for face in detected_faces:
-            face_embedding = DeepFace.represent(
+        for face in faces:
+            embedding = DeepFace.represent(
                 img_path=face["face"],
-                model_name="SFace",   # 🔥 LIGHTWEIGHT MODEL
+                model_name="Facenet",
+                detector_backend="opencv",
                 enforce_detection=False
             )
-            classroom_embeddings.append(face_embedding[0]["embedding"])
-
-        if not classroom_embeddings:
-            raise HTTPException(status_code=400, detail="No faces detected")
+            classroom_embeddings.append(embedding[0]["embedding"])
 
         students = db.query(Student).all()
 

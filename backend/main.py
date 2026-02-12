@@ -16,7 +16,11 @@ from datetime import datetime
 DATABASE_URL = "sqlite:///./students.db"
 MATCH_THRESHOLD = 0.6  # good for normalized embeddings
 
-# =========================
+=True, index=True)
+    dob = Column(String)
+    embedding = Column(LargeBinary, nullable=False)
+
+Base.metadata.create_all(bind=engine)# =========================
 # DATABASE SETUP
 # =========================
 
@@ -33,11 +37,7 @@ class Student(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
-    roll_no = Column(String, unique=True, index=True)
-    dob = Column(String)
-    embedding = Column(LargeBinary, nullable=False)
-
-Base.metadata.create_all(bind=engine)
+    roll_no = Column(String, unique
 
 def get_db():
     db = SessionLocal()

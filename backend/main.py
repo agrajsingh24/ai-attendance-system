@@ -14,8 +14,8 @@ from insightface.app import FaceAnalysis
 # CONFIG
 # =========================
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./students.db")
-MATCH_THRESHOLD = 0.6
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./students.db").strip()
+MATCH_THRESHOLD = 1.1
 
 # =========================
 # DATABASE SETUP
@@ -216,6 +216,10 @@ async def mark_attendance(
 
     all_students = set(known_names)
     absent_students = list(all_students - present_students)
+
+    print("Distances:", distances)
+    print("Min Distance:", min_distance)
+
 
     return {
         "date": str(datetime.now().date()),

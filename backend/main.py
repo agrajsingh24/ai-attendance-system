@@ -3,9 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import create_engine, Column, Integer, String, LargeBinary
 from sqlalchemy.orm import sessionmaker, declarative_base
+from insightface.app import FaceAnalysis
 import numpy as np
 import cv2
-import insightface
 import pickle
 from datetime import datetime
 
@@ -47,17 +47,10 @@ def get_db():
         db.close()
 
 # =========================
-# LOAD INSIGHTFACE MODEL
-# =========================
-
-app_face = insightface.app.FaceAnalysis(name="buffalo_l")
-app_face.prepare(ctx_id=0)
-
-# =========================
 # FASTAPI INIT
 # =========================
 
-app = FastAPI(title="AI Attendance System (InsightFace)")
+app = FastAPI(title="AI Attendance System (InsightFace - Railway Optimized)")
 
 app.add_middleware(
     CORSMiddleware,
@@ -66,6 +59,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# =========================
+# LOAD INSIGHTFACE MODEL (LIGHT VERSION)
+# =========================
+
+app_face = None  # global model
+
+@app.on_event("startup")
+def load_model():
+    global app_face
+    app_face = FaceAnalysis(name="buffalo_s")  # lighter model
+    app_face.prepare(ctx_id=-1)  # force CPU (Railway has no GPU)
+
+# =========================
+# ROOT
+# =========================
 
 @app.get("/")
 def root():
@@ -153,13 +162,15 @@ async def mark_attendance(
         known_encodings.append(encoding)
         known_names.append(student.name)
 
+    known_encodings = np.array(known_encodings)
+
     present_students = set()
 
     for face in faces:
         face_embedding = face.embedding
 
         distances = np.linalg.norm(
-            np.array(known_encodings) - face_embedding,
+            known_encodings - face_embedding,
             axis=1
         )
 

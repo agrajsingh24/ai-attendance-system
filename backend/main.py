@@ -180,19 +180,26 @@ async def mark_attendance(
 
     present_students = set()
 
-    for face in faces:
-        face_embedding = normalize(face.embedding)
+   for face in faces:
+    face_embedding = normalize(face.embedding)
 
-        distances = np.linalg.norm(
-            known_encodings - face_embedding,
-            axis=1
-        )
+    distances = np.linalg.norm(
+        known_encodings - face_embedding,
+        axis=1
+    )
 
-        min_distance = np.min(distances)
-        best_match_index = np.argmin(distances)
+    print("----")
+    print("Distances:", distances)
 
-        if min_distance < MATCH_THRESHOLD:
-            present_students.add(known_names[best_match_index])
+    min_distance = np.min(distances)
+    best_match_index = np.argmin(distances)
+
+    print("Best Match:", known_names[best_match_index])
+    print("Min Distance:", min_distance)
+
+    if min_distance < MATCH_THRESHOLD:
+        present_students.add(known_names[best_match_index])
+
 
     all_students = set(known_names)
     absent_students = list(all_students - present_students)

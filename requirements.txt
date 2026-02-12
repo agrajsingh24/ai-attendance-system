@@ -3,6 +3,7 @@ uvicorn
 sqlalchemy
 psycopg2-binary
 insightface
+onnxruntime
 opencv-python-headless
 numpy
 python-multipart

@@ -14,7 +14,10 @@ from datetime import datetime
 # =========================
 
 DATABASE_URL = "sqlite:///./students.db"
-MATCH_THRESHOLD = 0.6  # lower = stricter
+
+# 0.6 is strict
+# 0.65 slightly relaxed (better for group photos)
+MATCH_THRESHOLD = 0.65  
 
 # =========================
 # DATABASE SETUP
@@ -61,16 +64,16 @@ app.add_middleware(
 )
 
 # =========================
-# LOAD INSIGHTFACE MODEL (LIGHT VERSION)
+# LOAD INSIGHTFACE MODEL
 # =========================
 
-app_face = None  # global model
+app_face = None
 
 @app.on_event("startup")
 def load_model():
     global app_face
-    app_face = FaceAnalysis(name="buffalo_s")  # lighter model
-    app_face.prepare(ctx_id=-1)  # force CPU (Railway has no GPU)
+    app_face = FaceAnalysis(name="buffalo_s")  # lightweight model
+    app_face.prepare(ctx_id=-1)  # CPU only
 
 # =========================
 # ROOT
@@ -114,9 +117,11 @@ async def register_student(
                 detail="Each selfie must contain exactly one face"
             )
 
-        embeddings.append(faces[0].embedding)
+        embeddings.append(faces[0].embedding.astype(np.float32))
 
-    avg_embedding = np.mean(embeddings, axis=0)
+    # Average embedding (master embedding)
+    avg_embedding = np.mean(embeddings, axis=0).astype(np.float32)
+
     embedding_bytes = pickle.dumps(avg_embedding)
 
     new_student = Student(
@@ -154,11 +159,12 @@ async def mark_attendance(
     if not students:
         raise HTTPException(status_code=400, detail="No registered students")
 
+    # Load known embeddings
     known_encodings = []
     known_names = []
 
     for student in students:
-        encoding = pickle.loads(student.embedding)
+        encoding = pickle.loads(student.embedding).astype(np.float32)
         known_encodings.append(encoding)
         known_names.append(student.name)
 
@@ -166,16 +172,21 @@ async def mark_attendance(
 
     present_students = set()
 
+    # For each detected face
     for face in faces:
-        face_embedding = face.embedding
+        face_embedding = face.embedding.astype(np.float32)
 
+        # Compute distances to ALL students
         distances = np.linalg.norm(
             known_encodings - face_embedding,
             axis=1
         )
 
-        min_distance = np.min(distances)
         best_match_index = np.argmin(distances)
+        min_distance = distances[best_match_index]
+
+        # Debug (optional)
+        # print("Min distance:", min_distance)
 
         if min_distance < MATCH_THRESHOLD:
             present_students.add(known_names[best_match_index])

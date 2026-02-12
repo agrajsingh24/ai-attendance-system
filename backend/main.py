@@ -1,15 +1,15 @@
 from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, Column, Integer, String, LargeBinary
 from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy import Column, Integer, String, Text
-from deepface import DeepFace
+import face_recognition
 import numpy as np
 import os
 import shutil
 import uuid
-import json
+import pickle
+import cv2
 from datetime import datetime
 
 # =========================
@@ -18,7 +18,7 @@ from datetime import datetime
 
 DATABASE_URL = "sqlite:///./students.db"
 UPLOAD_FOLDER = "temp_uploads"
-SIMILARITY_THRESHOLD = 0.6
+MATCH_THRESHOLD = 0.5  # 0.4 strict | 0.5 balanced | 0.6 lenient
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
@@ -34,6 +34,7 @@ engine = create_engine(
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
+
 class Student(Base):
     __tablename__ = "students"
 
@@ -41,9 +42,11 @@ class Student(Base):
     name = Column(String, nullable=False)
     roll_no = Column(String, unique=True, index=True)
     dob = Column(String)
-    embedding = Column(Text, nullable=False)
+    embedding = Column(LargeBinary, nullable=False)  # store 128d encoding
+
 
 Base.metadata.create_all(bind=engine)
+
 
 def get_db():
     db = SessionLocal()
@@ -52,11 +55,12 @@ def get_db():
     finally:
         db.close()
 
+
 # =========================
 # APP INIT
 # =========================
 
-app = FastAPI(title="AI Attendance System")
+app = FastAPI(title="AI Attendance System (face-recognition)")
 
 app.add_middleware(
     CORSMiddleware,
@@ -66,25 +70,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# =========================
-# FACE UTILITIES
-# =========================
-
-def get_embedding(image_path):
-    result = DeepFace.represent(
-        img_path=image_path,
-        model_name="Facenet512",
-        enforce_detection=True
-    )
-    return result[0]["embedding"]
-
-def average_embeddings(embeddings):
-    return np.mean(embeddings, axis=0).tolist()
-
-def cosine_similarity(a, b):
-    a = np.array(a)
-    b = np.array(b)
-    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
 # =========================
 # ROUTES
@@ -92,7 +77,8 @@ def cosine_similarity(a, b):
 
 @app.get("/")
 def root():
-    return {"message": "AI Attendance Backend Running"}
+    return {"message": "AI Attendance Backend Running (face-recognition version)"}
+
 
 # -------------------------
 # STUDENT REGISTRATION
@@ -113,35 +99,45 @@ async def register_student(
     if existing:
         raise HTTPException(status_code=400, detail="Roll number already exists")
 
-    embeddings = []
+    encodings = []
 
     for file in files:
-        temp_path = os.path.join(UPLOAD_FOLDER, f"{uuid.uuid4().hex}.jpg")
-        with open(temp_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        contents = await file.read()
+        np_img = np.frombuffer(contents, np.uint8)
+        image = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
 
-        try:
-            emb = get_embedding(temp_path)
-            embeddings.append(emb)
-        except:
-            os.remove(temp_path)
-            raise HTTPException(status_code=400, detail="Face not detected properly")
+        if image is None:
+            raise HTTPException(status_code=400, detail="Invalid image file")
 
-        os.remove(temp_path)
+        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-    avg_embedding = average_embeddings(embeddings)
+        faces = face_recognition.face_encodings(rgb)
+
+        if len(faces) != 1:
+            raise HTTPException(
+                status_code=400,
+                detail="Each selfie must contain exactly one clear face"
+            )
+
+        encodings.append(faces[0])
+
+    # Average embedding
+    avg_encoding = np.mean(encodings, axis=0)
+
+    embedding_bytes = pickle.dumps(avg_encoding)
 
     new_student = Student(
         name=name,
         roll_no=roll_no,
         dob=dob,
-        embedding=json.dumps(avg_embedding)
+        embedding=embedding_bytes
     )
 
     db.add(new_student)
     db.commit()
 
     return {"message": "Student registered successfully"}
+
 
 # -------------------------
 # ATTENDANCE (MULTI FACE)
@@ -152,53 +148,56 @@ async def mark_attendance(
     file: UploadFile = File(...),
     db: Session = Depends(get_db)
 ):
-    temp_path = os.path.join(UPLOAD_FOLDER, f"{uuid.uuid4().hex}.jpg")
+    contents = await file.read()
+    np_img = np.frombuffer(contents, np.uint8)
+    image = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
 
-    with open(temp_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    if image is None:
+        raise HTTPException(status_code=400, detail="Invalid image")
 
-    try:
-        # Detect faces
-        faces = DeepFace.extract_faces(
-            img_path=temp_path,
-            enforce_detection=True
-        )
+    rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-        if not faces:
-            raise HTTPException(status_code=400, detail="No faces detected")
+    # Detect multiple faces
+    face_locations = face_recognition.face_locations(rgb)
+    face_encodings = face_recognition.face_encodings(rgb, face_locations)
 
-        students = db.query(Student).all()
+    if len(face_encodings) == 0:
+        raise HTTPException(status_code=400, detail="No faces detected")
 
-        present = set()
-        absent = []
+    students = db.query(Student).all()
 
-        for face in faces:
-            face_embedding = DeepFace.represent(
-                img_path=face["face"],
-                model_name="Facenet512",
-                enforce_detection=False
-            )[0]["embedding"]
+    if not students:
+        raise HTTPException(status_code=400, detail="No registered students")
 
-            for student in students:
-                stored_embedding = json.loads(student.embedding)
+    known_encodings = []
+    known_names = []
 
-                similarity = cosine_similarity(face_embedding, stored_embedding)
+    for student in students:
+        encoding = pickle.loads(student.embedding)
+        known_encodings.append(encoding)
+        known_names.append(student.name)
 
-                if similarity > SIMILARITY_THRESHOLD:
-                    present.add(student.name)
+    present_students = set()
 
-        for student in students:
-            if student.name not in present:
-                absent.append(student.name)
+    for face_encoding in face_encodings:
+        distances = face_recognition.face_distance(known_encodings, face_encoding)
 
-        return {
-            "date": str(datetime.now().date()),
-            "time": datetime.now().strftime("%H:%M:%S"),
-            "present": list(present),
-            "absent": absent
-        }
+        if len(distances) == 0:
+            continue
 
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        min_distance = np.min(distances)
+        best_match_index = np.argmin(distances)
 
+        if min_distance < MATCH_THRESHOLD:
+            name = known_names[best_match_index]
+            present_students.add(name)
+
+    all_students = set(known_names)
+    absent_students = list(all_students - present_students)
+
+    return {
+        "date": str(datetime.now().date()),
+        "time": datetime.now().strftime("%H:%M:%S"),
+        "present": list(present_students),
+        "absent": absent_students
+    }

@@ -2,8 +2,7 @@ fastapi
 uvicorn
 sqlalchemy
 python-multipart
-deepface==0.0.93
-tf-keras
+face-recognition
 opencv-python-headless
 numpy
 gunicorn

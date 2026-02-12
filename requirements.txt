@@ -2,11 +2,8 @@ fastapi
 uvicorn
 sqlalchemy
 psycopg2-binary
-onnxruntime
-numpy
-opencv-python-headless
 python-multipart
 deepface
 tensorflow-cpu==2.15.0
 opencv-python-headless
-psycopg2-binary
+numpy

@@ -1,10 +1,8 @@
 fastapi
 uvicorn
-opencv-python
-deepface
-numpy
 sqlalchemy
 psycopg2-binary
+onnxruntime
+numpy
+opencv-python-headless
 python-multipart
-tf-keras
-gunicorn

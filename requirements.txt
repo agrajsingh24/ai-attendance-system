@@ -1,7 +1,6 @@
 fastapi
 uvicorn
 sqlalchemy
-psycopg2-binary
 python-multipart
 deepface==0.0.93
 tf-keras
